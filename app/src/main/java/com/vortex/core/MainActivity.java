@@ -1,284 +1,24 @@
-package com.vortex.core;
-
-import android.app.Activity;
-import android.app.ActivityManager;
-import android.content.Intent;
-import android.content.IntentFilter;
-import android.content.SharedPreferences;
-import android.content.res.AssetManager;
-import android.graphics.Color;
-import android.graphics.PorterDuff;
-import android.graphics.drawable.Drawable;
-import android.graphics.drawable.GradientDrawable;
-import android.net.Uri;
-import android.os.Build;
-import android.os.BatteryManager;
-import android.os.Bundle;
-import android.os.Environment;
-import android.os.Handler;
-import android.os.Looper;
-import android.provider.MediaStore;
-import android.text.TextUtils;
-import android.text.method.ScrollingMovementMethod;
-import android.util.Log;
-import android.view.Gravity;
-import android.view.View;
-import android.widget.ArrayAdapter;
-import android.widget.Button;
-import android.widget.EditText;
-import android.widget.ImageView;
-import android.widget.LinearLayout;
-import android.widget.ScrollView;
-import android.widget.SeekBar;
-import android.widget.TextView;
-import android.widget.Toast;
-import android.widget.ViewFlipper;
-import androidx.activity.result.ActivityResultLauncher;
-import androidx.activity.result.contract.ActivityResultContracts;
-import androidx.appcompat.app.AlertDialog;
-import androidx.appcompat.app.AppCompatActivity;
-import androidx.core.content.ContextCompat;
-import com.bumptech.glide.Glide;
-import java.io.BufferedReader;
-import java.io.File;
-import java.io.FileOutputStream;
-import java.io.InputStream;
-import java.io.InputStreamReader;
-import java.io.IOException;
-import java.io.OutputStream;
-import java.lang.Process;
-import java.util.ArrayList;
-import java.util.Collections;
-import java.util.List;
-
-public class MainActivity extends AppCompatActivity {
-    // UI Components
-    private TextView tvRam, tvZram, tvCpu, tvBattery;
-    private TextView tvKernel, tvDevice, tvTerminalLog;
-    private TextView tvLittleCluster, tvBigCluster, tvCurrentFreq, tvMaxFreq, tvCpuVendor, tvTemp, tvGpuRenderer, tvGpuVersion, tvMaxFreqTools, tvAuthActive;
-    private ImageView headerBanner;
-    private SeekBar seekBarMaxFreq;
-    private LinearLayout cardRam, cardBat, rootLayout, bannerContainer;
-    private ViewFlipper viewFlipper;
-    private LinearLayout navSystem, navTools, navSettings;
-    private EditText inputCode; 
-
-    // System Vars
-    private SharedPreferences prefs;
-    private Handler handler = new Handler(Looper.getMainLooper());
-    
-    // CPU Control Data
-    private int cpuMaxFreqKhz = 0;
-    private int cpuMinFreqKhz = 0;
-    private int staticCoreCount = 4;
-    private String staticLittleFreq = "N/A";
-    private String staticBigFreq = "N/A";
-    private String totalRamStr = "Unknown"; 
-
-    // GPU Control Data
-    private int gpuMaxFreqKhz = 0;
-    private int gpuMinFreqKhz = 0;
-    private String gpuMaxFreqPath = "";
-    private String gpuCurFreqPath = "";
-    private String gpuGovPath = "";
-    private String gpuAvailFreqPath = ""; 
-    private boolean isGpuControlReady = false;
-    private boolean isGpuModeActive = false;
-    private List<Integer> gpuAvailableFreqs = new ArrayList<>(); 
-    
-    // ZRAM State Tracking
-    private int currentZramSizeGB = 0;
-
-    // Animation Helper
-    private boolean batteryBlinkState = false;
-
-    private boolean isGlassTheme = false;
-    private int iconColorMode = 0; 
-    private boolean staticInfoLoaded = false;
-    
-    // Launcher untuk Pick Image
-    private ActivityResultLauncher<Intent> pickImageLauncher;
-
-    @Override
-    protected void onCreate(Bundle savedInstanceState) {
-        super.onCreate(savedInstanceState);
-        setContentView(R.layout.activity_main);
-
-        prefs = getSharedPreferences("VortexPrefs", 0);
         
-        pickImageLauncher = registerForActivityResult(
-            new ActivityResultContracts.StartActivityForResult(),
-            result -> {
-                if (result.getResultCode() == Activity.RESULT_OK && result.getData() != null) {
-                    Uri imageUri = result.getData().getData();
-                    copyImageToInternal(imageUri);
-                }
-            }
-        );
-
-        initViews();
-        loadThemeSettings();
-
-        // --- AUTH LOGIC ---
-        String kernelName = "";
-        try {
-            Process p = Runtime.getRuntime().exec("uname -r");
-            BufferedReader reader = new BufferedReader(new InputStreamReader(p.getInputStream()));
-            kernelName = reader.readLine();
-            if(kernelName == null) kernelName = "";
-        } catch (Exception e) {
-            kernelName = "";
-        }
-
-        Log.d("VortexAuth", "Kernel: " + kernelName);
-        boolean isEKernel = kernelName.toLowerCase().contains("vortex");
-
-        if(isEKernel) {
-            prefs.edit().putBoolean("is_unlocked", true).apply();
-            if(tvAuthActive != null) tvAuthActive.setVisibility(View.VISIBLE);
-            Toast.makeText(this, "VorteX Kernel Detected!", Toast.LENGTH_SHORT).show();
-        } else {
-            if(tvAuthActive != null) tvAuthActive.setVisibility(View.GONE);
-        }
-
-        setupClickListeners();
-        refreshUI();
-        loadCustomBanner();
-    }
-
-    // --- HELPER: SAFE INT PARSING ---
-    private int parseIntSafe(String s) {
-        if (s == null) return -1;
-        String trimmed = s.trim();
-        if (!trimmed.matches("\\d+")) return -1;
-        try {
-            return Integer.parseInt(trimmed);
-        } catch (NumberFormatException e) {
-            return -1;
-        }
-    }
-
-    // --- HELPER: GET TOTAL RAM BYTES ---
-    private long getTotalRamBytes() {
-        ActivityManager memInfo = (ActivityManager) getSystemService(ACTIVITY_SERVICE);
-        ActivityManager.MemoryInfo mi = new ActivityManager.MemoryInfo();
-        memInfo.getMemoryInfo(mi);
-        return mi.totalMem;
-    }
-
-    private String getPasskeyFromAssets() {
-        try {
-            AssetManager am = getAssets();
-            InputStream is = am.open("VORTEX_PASSKEY.txt");
-            BufferedReader reader = new BufferedReader(new InputStreamReader(is));
-            String line;
-            while ((line = reader.readLine()) != null) {
-                if (line.startsWith("PASSKEY:")) {
-                    String key = line.substring("PASSKEY:".length()).trim();
-                    reader.close();
-                    return key;
-                }
-            }
-            reader.close();
-        } catch (IOException e) {
-            Log.e("VortexAuth", "Error reading passkey from assets", e);
-        }
-        return "vortex"; 
-    }
-
-    private void initViews() {
-        tvRam = findViewById(R.id.tv_ram);
-        tvZram = findViewById(R.id.tv_zram);
-        tvCpu = findViewById(R.id.tv_cpu);
-        tvBattery = findViewById(R.id.tv_battery);
-        tvKernel = findViewById(R.id.tv_kernel);
-        tvDevice = findViewById(R.id.tv_device);
-        tvTerminalLog = findViewById(R.id.tv_terminal_log);
-        
-        tvLittleCluster = findViewById(R.id.tv_little_cluster);
-        tvBigCluster = findViewById(R.id.tv_big_cluster);
-        tvCurrentFreq = findViewById(R.id.tv_current_freq);
-        tvMaxFreq = findViewById(R.id.tv_max_freq);
-        tvCpuVendor = findViewById(R.id.tv_cpu_vendor);
-        tvTemp = findViewById(R.id.tv_temp);
-        tvGpuRenderer = findViewById(R.id.tv_gpu_renderer);
-        tvGpuVersion = findViewById(R.id.tv_gpu_version);
-        tvMaxFreqTools = findViewById(R.id.tv_max_freq_tools);
-        tvAuthActive = findViewById(R.id.tv_auth_active);
-
-        headerBanner = findViewById(R.id.header_banner);
-        seekBarMaxFreq = findViewById(R.id.seekbar_max_freq);
-        cardRam = findViewById(R.id.card_ram);
-        cardBat = findViewById(R.id.card_bat);
-        rootLayout = findViewById(R.id.root_layout);
-        bannerContainer = findViewById(R.id.banner_container);
-
-        viewFlipper = findViewById(R.id.main_view_flipper);
-        navSystem = findViewById(R.id.nav_system);
-        navTools = findViewById(R.id.nav_tools);
-        navSettings = findViewById(R.id.nav_settings);
-
-        inputCode = findViewById(R.id.input_code);
-
-        if(tvTerminalLog != null) tvTerminalLog.setMovementMethod(new ScrollingMovementMethod());
-
-        if(tvRam != null) {
-            tvRam.setMaxLines(1);
-            tvRam.setSingleLine(true);
-            tvRam.setEllipsize(null); 
-            tvRam.setHorizontallyScrolling(true);
-            tvRam.setGravity(Gravity.CENTER_VERTICAL);
-            tvRam.setIncludeFontPadding(false);
-        }
-
-        if (navSystem != null && navSystem.getChildCount() > 0) {
-            View child = navSystem.getChildAt(0);
-            if(child instanceof TextView) ((TextView) child).setCompoundDrawablesRelativeWithIntrinsicBounds(android.R.drawable.ic_menu_info_details, 0, 0, 0);
-        }
-        if (navTools != null && navTools.getChildCount() > 0) {
-            View child = navTools.getChildAt(0);
-            if(child instanceof TextView) ((TextView) child).setCompoundDrawablesRelativeWithIntrinsicBounds(android.R.drawable.ic_menu_manage, 0, 0, 0);
-        }
-        if (navSettings != null && navSettings.getChildCount() > 0) {
-            View child = navSettings.getChildAt(0);
-            if(child instanceof TextView) ((TextView) child).setCompoundDrawablesRelativeWithIntrinsicBounds(android.R.drawable.ic_menu_preferences, 0, 0, 0);
-        }
-    }
-
-    private void loadThemeSettings() {
-        isGlassTheme = prefs.getBoolean("glass_theme", false);
-        iconColorMode = prefs.getInt("icon_color_mode", 0);
-        applyThemeSettings();
-    }
-
-    private void setupClickListeners() {
-        Button btnUnlock = findViewById(R.id.btn_unlock);
-        if(btnUnlock != null) {
-            btnUnlock.setOnClickListener(v -> {
-                if(inputCode == null) inputCode = findViewById(R.id.input_code);
-                String userInput = inputCode.getText().toString().trim();
-                String validKey = getPasskeyFromAssets(); 
-                if (userInput.equals(validKey)) {
-                    prefs.edit().putBoolean("is_unlocked", true).apply();
-                    refreshUI();
-                    Toast.makeText(this, "ACCESS GRANTED", Toast.LENGTH_SHORT).show();
-                } else {
-                    Toast.makeText(this, "DENIED: Invalid Key", Toast.LENGTH_SHORT).show();
-                }
+        // Keybox Tool Listeners
+        if(btnKeyboxMode1 != null) {
+            btnKeyboxMode1.setOnClickListener(v -> {
+                if(!isKeyboxRunning) showKeyboxConfirmDialog("1", "Direct Source");
+                else Toast.makeText(this, "Running...", Toast.LENGTH_SHORT).show();
             });
         }
-
-        findViewById(R.id.btn_cpu_gov).setOnClickListener(v -> pickGov()); 
-        findViewById(R.id.btn_set_zram).setOnClickListener(v -> showZramMenu());
-        findViewById(R.id.btn_thermal).setOnClickListener(v -> showThermalMenu());
-        findViewById(R.id.btn_clean_ram).setOnClickListener(v -> {
-            Toast.makeText(this, "Starting Advanced Clean...", Toast.LENGTH_SHORT).show();
-            cleanRam();
-        });
-
-        findViewById(R.id.btn_gpu_control).setOnClickListener(v -> showGpuFreqMenu());
-        findViewById(R.id.btn_io_scheduler).setOnClickListener(v -> showIoSchedulerMenu());
-        findViewById(R.id.btn_zram_algo).setOnClickListener(v -> showZramAlgoMenu()); 
+        
+        if(btnKeyboxMode2 != null) {
+            btnKeyboxMode2.setOnClickListener(v -> {
+                if(!isKeyboxRunning) showKeyboxConfirmDialog("2", "Advanced Engine");
+                else Toast.makeText(this, "Running...", Toast.LENGTH_SHORT).show();
+            });
+        }
+        
+        if(btnCheckIntegrity != null) {
+            btnCheckIntegrity.setOnClickListener(v -> {
+                if(!isKeyboxRunning) executeKeyboxScript("3");
+            });
+        }
         findViewById(R.id.btn_saturation).setOnClickListener(v -> showSaturationMenu()); 
         findViewById(R.id.btn_renderer).setOnClickListener(v -> showRendererMenu());
         findViewById(R.id.btn_vsync).setOnClickListener(v -> toggleCpuVsync());
@@ -1311,5 +1051,152 @@ public class MainActivity extends AppCompatActivity {
             });
             try { Thread.sleep(5000); } catch (Exception e){}
         }).start();
+    }
+}
+    // ============================================
+    // KEYBOX TOOL - CONFIRMATION DIALOG
+    // ============================================
+    private void showKeyboxConfirmDialog(String mode, String modeName) {
+        AlertDialog.Builder builder = new AlertDialog.Builder(this);
+        builder.setTitle("VorteX Keybox Tool");
+        builder.setMessage("Execute " + modeName + "?\n\nDownload/generate keybox\nInject to Tricky Store\nRequire ROOT access");
+        builder.setPositiveButton("EXECUTE", (dialog, which) -> executeKeyboxScript(mode));
+        builder.setNegativeButton("Cancel", null);
+        builder.show();
+    }
+
+    // ============================================
+    // KEYBOX TOOL - MAIN EXECUTION
+    // ============================================
+    private void executeKeyboxScript(String mode) {
+        isKeyboxRunning = true;
+        tvKeyboxStatus.setText("Running...");
+        tvKeyboxStatus.setTextColor(Color.parseColor("#FF9800"));
+        tvKeyboxLog.setText("");
+        
+        appendKeyboxLog("============================================");
+        appendKeyboxLog(" VORTEX KEYBOX TOOL - @VorteXSU_Dev");
+        appendKeyboxLog(" Mode: " + mode + " | Starting...");
+        appendKeyboxLog("============================================\n");
+        
+        btnKeyboxMode1.setEnabled(false);
+        btnKeyboxMode2.setEnabled(false);
+        btnCheckIntegrity.setEnabled(false);
+        
+        new Thread(() -> {
+            try {
+                String scriptPath = copyKeyboxScriptToTemp();
+                if(scriptPath == null) {
+                    appendKeyboxLog("ERROR: Failed to extract script!");
+                    resetKeyboxUI();
+                    return;
+                }
+                
+                appendKeyboxLog("Script ready: " + scriptPath);
+                Runtime.getRuntime().exec("chmod 755 " + scriptPath);
+                
+                String[] command;
+                if(mode.equals("3")) {
+                    command = new String[]{"sh", scriptPath, "3"};
+                } else {
+                    command = new String[]{"sh", "-c", "echo '" + mode + "' | sh " + scriptPath};
+                }
+                
+                appendKeyboxLog("Executing mode " + mode + "...\n");
+                
+                ProcessBuilder pb = new ProcessBuilder(command);
+                pb.redirectErrorStream(true);
+                pb.environment().put("HOME", "/sdcard");
+                pb.environment().put("TERM", "xterm");
+                
+                keyboxProcess = pb.start();
+                BufferedReader reader = new BufferedReader(
+                    new InputStreamReader(keyboxProcess.getInputStream())
+                );
+                
+                String line;
+                while ((line = reader.readLine()) != null) {
+                    final String logLine = line;
+                    keyboxHandler.post(() -> {
+                        appendKeyboxLog(logLine);
+                        ScrollView sv = (ScrollView) tvKeyboxLog.getParent();
+                        if(sv != null) sv.fullScroll(View.FOCUS_DOWN);
+                    });
+                }
+                
+                int exitCode = keyboxProcess.waitFor();
+                final int finalExitCode = exitCode;
+                
+                keyboxHandler.post(() -> {
+                    appendKeyboxLog("--------------------------------------------");
+                    if(finalExitCode == 0) {
+                        appendKeyboxLog("SUCCESS!");
+                        tvKeyboxStatus.setText("Success");
+                        tvKeyboxStatus.setTextColor(Color.parseColor("#4CAF50"));
+                    } else {
+                        appendKeyboxLog("FAILED (code: " + finalExitCode + ")");
+                        tvKeyboxStatus.setText("Failed");
+                        tvKeyboxStatus.setTextColor(Color.parseColor("#F44336"));
+                    }
+                    appendKeyboxLog("============================================");
+                    resetKeyboxUI();
+                });
+                
+            } catch (Exception e) {
+                e.printStackTrace();
+                keyboxHandler.post(() -> {
+                    appendKeyboxLog("ERROR: " + e.getMessage());
+                    tvKeyboxStatus.setText("Error");
+                    tvKeyboxStatus.setTextColor(Color.parseColor("#F44336"));
+                    resetKeyboxUI();
+                });
+            }
+        }).start();
+    }
+
+    // ============================================
+    // KEYBOX TOOL - COPY FROM ASSETS
+    // ============================================
+    private String copyKeyboxScriptToTemp() {
+        try {
+            AssetManager am = getAssets();
+            InputStream is = am.open("generate_keybox.sh");
+            File tempDir = new File("/data/local/tmp");
+            if(!tempDir.exists()) tempDir = new File("/sdcard");
+            
+            File scriptFile = new File(tempDir, "vortex_keybox_tool.sh");
+            FileOutputStream fos = new FileOutputStream(scriptFile);
+            byte[] buffer = new byte[1024];
+            int read;
+            while ((read = is.read(buffer)) != -1) {
+                fos.write(buffer, 0, read);
+            }
+            is.close();
+            fos.close();
+            return scriptFile.getAbsolutePath();
+        } catch (IOException e) {
+            Log.e("KeyboxTool", "Copy failed", e);
+            return null;
+        }
+    }
+
+    // ============================================
+    // KEYBOX TOOL - APPEND LOG
+    // ============================================
+    private void appendKeyboxLog(String msg) {
+        if(tvKeyboxLog != null) {
+            tvKeyboxLog.setText(tvKeyboxLog.getText().toString() + msg + "\n");
+        }
+    }
+
+    // ============================================
+    // KEYBOX TOOL - RESET UI
+    // ============================================
+    private void resetKeyboxUI() {
+        isKeyboxRunning = false;
+        keyboxProcess = null;
+        if(btnKeyboxMode1 != null) btnKeyboxMode1.setEnabled(true);
+        if(btnKeyboxMode2 != null) btnKeyboxMode2.setEnabled(true);
+        if(btnCheckIntegrity != null) btnCheckIntegrity.setEnabled(true);
     }
 }
